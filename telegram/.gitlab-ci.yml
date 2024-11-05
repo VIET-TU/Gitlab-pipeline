@@ -1,0 +1,33 @@
+stages:
+  - build
+  - print
+
+build_check:
+  stage: build
+  script:
+    - docker build -t vue3-boilaerplate . > build.log 2&1 || echo "Build failed"
+  artifacts:
+    paths:
+      - build.log
+
+build:
+  stage: print
+  script:
+    - build_content=$(cat build.log)
+    - |
+      project_info=$(cat <<EOF
+      ===Notification from the system===
+      Project ID: $CI_PROJECT_ID
+      Project name: SCI PROJECT_NAME
+      Project URL: $CI_PROJECT_URL
+      Branch: $CI COMMIT REF_NAME
+      Commit: $CI_COMMIT_SHA
+      EOF
+      )
+    - message="$build_content"$"\n\n'"$project_info"
+    - echo $build_content
+    - if grep -q "ERROR" build.log; then curl -X POST
+      "https://api.telegram.org/bot$TOKEN BOTFATHER/sendMessage" -d "chat_id=$CHAT_ID&text=$message"; exit 1; fi
+  artifacts:
+    paths:
+      - build.log

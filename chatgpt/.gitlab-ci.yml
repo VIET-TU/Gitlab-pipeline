@@ -1,0 +1,131 @@
+stages:
+  - build
+  - test
+  - deploy_staging
+  - deploy_production
+  - cleanup
+
+variables:
+  PROJECT_NAME: "my_project"
+  IMAGE_TAG: "$CI_COMMIT_REF_SLUG"
+  CI_REGISTRY_IMAGE: "$CI_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME"
+
+cache:
+  key: "$CI_COMMIT_REF_NAME"
+  paths:
+    - node_modules/
+    - .cache/
+  policy: pull-push
+  expire_in: 1 week
+
+build:
+  stage: build
+  before_script:
+    - echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - docker-compose build
+    - docker image tag $PROJECT_NAME:$IMAGE_TAG $CI_REGISTRY_IMAGE:$IMAGE_TAG
+    - docker push $CI_REGISTRY_IMAGE:$IMAGE_TAG
+    - docker rmi $PROJECT_NAME:$IMAGE_TAG $CI_REGISTRY_IMAGE:$IMAGE_TAG
+  cache:
+    key: "$CI_COMMIT_REF_NAME-build"
+    paths:
+      - node_modules/
+      - dist/
+      - .gradle/
+    policy: push
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop" || $CI_COMMIT_REF_NAME == "staging"'
+    - if: '$CI_COMMIT_TAG == "true"'
+
+unit_test:
+  stage: test
+  script:
+    - npm install
+    - npm run test:unit -- --reporters=default --reporters=jest-junit
+  cache:
+    key: "$CI_COMMIT_REF_NAME-unit-test"
+    paths:
+      - node_modules/
+      - .cache/
+    policy: push
+    expire_in: 1 week
+  artifacts:
+    when: always
+    reports:
+      junit: report/unit-test.xml
+    paths:
+      - report/unit-test.xml
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop" || $CI_COMMIT_REF_NAME == "staging"'
+    - if: '$CI_COMMIT_TAG == "true"'
+
+integration_test:
+  stage: test
+  script:
+    - npm install
+    - npm run test:integration -- --reporters=default --reporters=jest-junit
+  cache:
+    key: "$CI_COMMIT_REF_NAME-integration-test"
+    paths:
+      - node_modules/
+      - .cache/
+    policy: push
+    expire_in: 1 week
+  artifacts:
+    when: always
+    reports:
+      junit: report/integration-test.xml
+    paths:
+      - report/integration-test.xml
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop" || $CI_COMMIT_REF_NAME == "staging"'
+    - if: '$CI_COMMIT_TAG == "true"'
+
+deploy_staging:
+  stage: deploy_staging
+  script:
+    - echo "Deploying to staging environment"
+    - ./deploy.sh staging
+  environment:
+    name: staging
+    url: https://staging.example.com
+  only:
+    - develop
+    - /^feature\/.*$/
+  cache:
+    key: "$CI_COMMIT_REF_NAME-deploy"
+    paths:
+      - node_modules/
+    policy: push
+    expire_in: 1 week
+
+deploy_production:
+  stage: deploy_production
+  script:
+    - echo "Deploying to production environment"
+    - ./deploy.sh production
+  environment:
+    name: production
+    url: https://example.com
+  only:
+    - master
+  cache:
+    key: "$CI_COMMIT_REF_NAME-deploy"
+    paths:
+      - node_modules/
+    policy: push
+    expire_in: 1 week
+
+cleanup:
+  stage: cleanup
+  script:
+    - docker image prune -f
+  when: always
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop" || $CI_COMMIT_REF_NAME == "staging"'
+    - if: '$CI_COMMIT_TAG == "true"'
+
+notifications:
+  stage: deploy

@@ -1,0 +1,188 @@
+variables:
+  USER_PROJECT: "onlineshop"
+  IMAGE_VERSION: "${CI_PROJECT_NAME}:${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}"
+  CODECLIMATE_REPORT: "codeclimate_analysis_${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}_report"
+  SNYKSCAN_REPORT: "snyk_scan_${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}_report"
+  TRIVYFS_REPORT: "trivyfs_scan_${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}_report"
+  TRIVY_IMAGE_REPORT: "security_scan_image_${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}_report"
+  CHECKMARX_TOKEN: "your_checkmarx_api_token"
+
+stages:
+  - build
+  - test
+  - security scan
+  - deploy
+
+before_script:
+  - dotnet restore
+
+build:
+  stage: build
+  variables:
+    GIT_STRATEGY: clone
+  script:
+    - dotnet build --configuration Release
+    - docker build -t $IMAGE_VERSION .
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+
+sonarqube_scan:
+  stage: test
+  image: sonarsource/sonar-scanner-cli:latest
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" # Giữ cache scanner giữa các job
+    GIT_DEPTH: "0" # Đảm bảo toàn bộ lịch sử commit có sẵn để SonarQube sử dụng
+  script:
+    - sonar-scanner -Dsonar.projectKey=$SONARQUBE_PROJECT_KEY -Dsonar.sources=. -Dsonar.host.url=$SONARQUBE_HOST_URL -Dsonar.login=$SONARQUBE_TOKEN
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+  artifacts:
+    paths:
+      - .sonar/cache
+    expire_in: 1 week
+
+unit_tests:
+  stage: test
+  script:
+    - dotnet test --logger:"trx;LogFileName=unit-test-report.xml"
+  tags:
+    - online-shop-runner-dev-shell
+  artifacts:
+    reports:
+      junit: report/unit-test-report.xml
+    paths:
+      - report/unit-test-report.xml
+    expire_in: 1 week
+  only:
+    - tags
+
+linting:
+  stage: test
+  script:
+    - dotnet format
+  tags:
+    - online-shop-runner-dev-shell
+  artifacts:
+    paths:
+      - report/linting-report.html
+    expire_in: 1 week
+  only:
+    - tags
+
+trivyfs_scan:
+  stage: test
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - docker run --rm -v $PWD:/${CI_PROJECT_NAME} -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy fs /${CI_PROJECT_NAME} --severity HIGH,CRITICAL --format template --template "@contrib/html.tpl" --output /${CI_PROJECT_NAME}/$TRIVYFS_REPORT.html --timeout 10m
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+  artifacts:
+    paths:
+      - $TRIVYFS_REPORT.html
+    expire_in: 1 day
+
+snyk_scan:
+  stage: test
+  variables:
+    GIT_STRATEGY: clone
+  script:
+    - docker build --rm --network host --build-arg SNYK_AUTH_TOKEN=$SNYK_TOKEN --build-arg OUTPUT_FILENAME=$SNYKSCAN_REPORT -t $SNYKSCAN_REPORT -f Dockerfile-snyk .
+    - docker create --name $SNYKSCAN_REPORT $SNYKSCAN_REPORT
+    - docker cp $SNYKSCAN_REPORT:/app/$SNYKSCAN_REPORT.html .
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+  artifacts:
+    paths:
+      - $SNYKSCAN_REPORT.html
+    expire_in: 1 day
+
+trivy_scan_image:
+  stage: security scan
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - docker run --rm -v $(pwd):/${CI_PROJECT_NAME} -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy clean --all
+    - docker run --rm -v $(pwd):/${CI_PROJECT_NAME} -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --format template --template "@contrib/html.tpl" --output /${CI_PROJECT_NAME}/${TRIVY_IMAGE_REPORT}.html $IMAGE_VERSION
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+  artifacts:
+    paths:
+      - ${TRIVY_IMAGE_REPORT}.html
+    expire_in: 1 day
+
+owasp_zap_scan:
+  stage: security scan
+  image: owasp/zap2docker-stable
+  script:
+    - zap-baseline.py -t http://your-application-url -r zap_report.html
+  artifacts:
+    paths:
+      - zap_report.html
+    expire_in: 1 week
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+
+bandit_scan:
+  stage: test
+  image: python:3.8
+  script:
+    - pip install bandit
+    - bandit -r your_python_project -f html -o bandit_report.html
+  artifacts:
+    paths:
+      - bandit_report.html
+    expire_in: 1 week
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+
+checkmarx_scan:
+  stage: test
+  image: checkmarx/cxflow:latest
+  script:
+    - cxflow -v --scan --project-name your_project_name --repo-name $CI_PROJECT_NAME --repo-url $CI_PROJECT_URL --branch $CI_COMMIT_REF_NAME --api-url https://checkmarx-api-url --token $CHECKMARX_TOKEN
+  tags:
+    - online-shop-runner-dev-shell
+  only:
+    - tags
+
+deploy:
+  stage: deploy
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - sudo su ${USER_PROJECT} -c "docker rm -f $CI_PROJECT_NAME; docker run --name $CI_PROJECT_NAME -dp $BE_PORT $IMAGE_VERSION"
+  tags:
+    - online-shop-runner-dev-shell
+  environment:
+    name: production
+    url: http://your-production-url.com
+  only:
+    - tags
+
+notifications:
+  stage: deploy
+  script:
+    - |
+      if [ "$CI_JOB_STATUS" == "success" ]; then
+        curl -X POST -H 'Content-type: application/json' --data '{"text":"Build and deployment successful"}' $SLACK_WEBHOOK_URL;
+      else
+        curl -X POST -H 'Content-type: application/json' --data '{"text":"Build or deployment failed"}' $SLACK_WEBHOOK_URL;
+      fi
+  when: always
+  tags:
+    - online-shop-runner-dev-shell
